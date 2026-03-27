@@ -1,0 +1,128 @@
+version: "3.9"
+
+services:
+  # PostgreSQL database service cho local development
+  db:
+    image: postgres:16-alpine
+    container_name: taskflow_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-taskflow_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskflow_password}
+      POSTGRES_DB: ${POSTGRES_DB:-taskflow_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskflow_user} -d ${POSTGRES_DB:-taskflow_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - taskflow_network
+
+  # FastAPI application service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: taskflow_app
+    restart: unless-stopped
+    environment:
+      # Database configuration
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-taskflow_user}:${POSTGRES_PASSWORD:-taskflow_password}@db:5432/${POSTGRES_DB:-taskflow_db}
+
+      # JWT configuration
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-supersecretkey_changeme_in_production}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+
+      # AWS Cognito configuration
+      AWS_REGION: ${AWS_REGION:-ap-southeast-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
+      COGNITO_CLIENT_SECRET: ${COGNITO_CLIENT_SECRET:-}
+
+      # AWS SES configuration
+      SES_FROM_EMAIL: ${SES_FROM_EMAIL:-noreply@taskflow.example.com}
+      SES_FROM_NAME: ${SES_FROM_NAME:-TaskFlow}
+
+      # AWS S3 configuration for avatar storage
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-taskflow-avatars}
+      S3_PRESIGNED_URL_EXPIRY: ${S3_PRESIGNED_URL_EXPIRY:-3600}
+
+      # AWS SNS configuration for push notifications
+      SNS_PLATFORM_APPLICATION_ARN_FCM: ${SNS_PLATFORM_APPLICATION_ARN_FCM:-}
+      SNS_PLATFORM_APPLICATION_ARN_APNS: ${SNS_PLATFORM_APPLICATION_ARN_APNS:-}
+
+      # AWS EventBridge Scheduler configuration
+      EVENTBRIDGE_SCHEDULER_ROLE_ARN: ${EVENTBRIDGE_SCHEDULER_ROLE_ARN:-}
+      EVENTBRIDGE_SCHEDULER_TARGET_ARN: ${EVENTBRIDGE_SCHEDULER_TARGET_ARN:-}
+
+      # FCM configuration for Android push notifications
+      FCM_SERVER_KEY: ${FCM_SERVER_KEY:-}
+
+      # APNs configuration for iOS push notifications
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-}
+
+      # Application configuration
+      APP_ENV: ${APP_ENV:-development}
+      APP_DEBUG: ${APP_DEBUG:-true}
+      APP_HOST: ${APP_HOST:-0.0.0.0}
+      APP_PORT: ${APP_PORT:-8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000","http://localhost:8080","http://localhost:19006"]}
+
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      # Mount source code for hot-reload in development
+      - .:/app
+      # Exclude __pycache__ and .venv from being overwritten
+      - /app/__pycache__
+      - /app/.venv
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - taskflow_network
+    # Chạy với hot-reload trong môi trường development
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app --log-level debug
+
+  # Alembic migration runner — chạy migration trước khi app start
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: taskflow_migrate
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-taskflow_user}:${POSTGRES_PASSWORD:-taskflow_password}@db:5432/${POSTGRES_DB:-taskflow_db}
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - taskflow_network
+    # Chạy Alembic upgrade để apply tất cả pending migrations
+    command: alembic upgrade head
+    # Container tự tắt sau khi migration hoàn tất
+    restart: "no"
+
+volumes:
+  # Named volume để persist PostgreSQL data giữa các lần restart container
+  postgres_data:
+    driver: local
+
+networks:
+  # Bridge network riêng cho TaskFlow services để cô lập với các project khác
+  taskflow_network:
+    driver: bridge
+    name: taskflow_network
